@@ -56,7 +56,7 @@ COPY --from=python-builder /opt/mcp-hub/python/google_workspace_mcp /opt/mcp-hub
 # config.example.yaml → config.yaml and customize it first.
 COPY config.yaml                                                    /etc/mcp-hub/config.yaml
 
-RUN useradd --system --uid 1000 --home /opt/mcp-hub --shell /usr/sbin/nologin mcphub && \
+RUN useradd --uid 1000 --user-group --home /opt/mcp-hub --shell /usr/sbin/nologin --no-create-home mcphub && \
     chown -R mcphub:mcphub /opt/mcp-hub /etc/mcp-hub
 USER mcphub
 
