@@ -1,5 +1,5 @@
 # ── Stage 1: Go dispatcher build ─────────────────────────────────────
-FROM golang:1.25-alpine AS go-builder
+FROM golang:1.26-alpine AS go-builder
 WORKDIR /build
 COPY dispatcher/go.mod dispatcher/go.sum ./
 RUN go mod download
