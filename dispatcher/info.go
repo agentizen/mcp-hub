@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
+	"mime"
 	"net/http"
+	"strings"
 )
 
 // InfoResponse is the body returned by GET|POST /mcp/{handle}/info.
@@ -89,14 +92,23 @@ func (d *Dispatcher) HandleInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Decode the JSON-RPC envelope.
+	// Decode the JSON-RPC envelope. The Streamable HTTP MCP transport
+	// spec lets servers answer with either application/json or
+	// text/event-stream; vendors like Exa pick SSE, so we sniff the
+	// Content-Type and extract the first data: payload when needed.
+	payload, err := readJSONRPCBody(resp)
+	if err != nil {
+		d.logger.Warn("info read upstream body", "handle", handle, "err", err)
+		http.Error(w, "bad upstream response", http.StatusBadGateway)
+		return
+	}
 	var upstream struct {
 		Result struct {
 			Tools []json.RawMessage `json:"tools"`
 		} `json:"result"`
 		Error json.RawMessage `json:"error,omitempty"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&upstream); err != nil {
+	if err := json.Unmarshal(payload, &upstream); err != nil {
 		d.logger.Warn("info decode upstream", "handle", handle, "err", err)
 		http.Error(w, "bad upstream response", http.StatusBadGateway)
 		return
@@ -123,6 +135,44 @@ func (d *Dispatcher) HandleInfo(w http.ResponseWriter, r *http.Request) {
 		Kind:   kind,
 		Tools:  tools,
 	})
+}
+
+// readJSONRPCBody returns the JSON-RPC envelope embedded in an MCP
+// response regardless of whether the upstream picked application/json
+// or text/event-stream as its Content-Type. For SSE, it concatenates
+// every `data:` line of the first event (SSE allows multi-line data)
+// and returns that as raw JSON.
+func readJSONRPCBody(resp *http.Response) ([]byte, error) {
+	mt, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	if mt != "text/event-stream" {
+		return io.ReadAll(resp.Body)
+	}
+	scanner := bufio.NewScanner(resp.Body)
+	// MCP tool listings can be sizeable; bump the default 64KiB cap.
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	var data strings.Builder
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			if data.Len() > 0 {
+				break // end of first event
+			}
+			continue
+		}
+		if rest, ok := strings.CutPrefix(line, "data:"); ok {
+			if data.Len() > 0 {
+				data.WriteByte('\n')
+			}
+			data.WriteString(strings.TrimPrefix(rest, " "))
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	if data.Len() == 0 {
+		return nil, errors.New("empty SSE stream")
+	}
+	return []byte(data.String()), nil
 }
 
 // filterToolsByAllowList keeps only the tools whose name is in allowed.
