@@ -11,7 +11,7 @@ RUN CGO_ENABLED=0 go build -ldflags="-s -w -X main.version=${VERSION}" -o /dispa
 # Use the Debian-based Node image so the resulting node_modules is
 # binary-compatible with the Debian slim runtime stage below (glibc,
 # not musl).
-FROM node:22-bookworm-slim AS node-builder
+FROM node:25-bookworm-slim AS node-builder
 WORKDIR /opt/mcp-hub/node
 COPY node/package.json node/package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
