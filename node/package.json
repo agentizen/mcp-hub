@@ -1,0 +1,13 @@
+{
+  "name": "mcp-hub-node-backend",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Node.js MCP backends vendored into mcp-hub. Each entry here is a subprocess referenced by config.yaml.",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@softeria/ms-365-mcp-server": "0.75.0"
+  }
+}
