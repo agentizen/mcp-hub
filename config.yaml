@@ -1,6 +1,296 @@
-# mcp-hub runtime configuration — empty placeholder.
-# Populate with subprocesses, remotes, and handles before shipping.
+# mcp-hub runtime configuration.
+#
+# Structure:
+#   subprocesses  — local MCP servers spawned lazily on first request.
+#   remotes       — vendor-hosted MCP endpoints reached over HTTPS.
+#   handles       — public routes exposed at /mcp/<handle>; each one
+#                   references exactly one subprocess or remote, and may
+#                   optionally filter the backend's tools via an
+#                   allow-list.
 
-subprocesses: []
-remotes: []
-handles: {}
+subprocesses:
+  # Microsoft 365 (Outlook, Calendar, OneDrive, SharePoint, Teams, Excel)
+  #
+  # softeria/ms-365-mcp-server validates every Authorization: Bearer
+  # header against Microsoft Graph on each request, so the hub stays
+  # pass-through and multi-tenant by design.
+  - name: m365
+    type: node
+    port: 9000
+    path: /mcp
+    cwd: /opt/mcp-hub/node
+    command:
+      - node_modules/.bin/ms-365-mcp-server
+      - --http
+      - ":9000"
+      - --org-mode
+
+  # Google Workspace (Drive, Gmail, Calendar)
+  #
+  # taylorwilsdon/google_workspace_mcp with MCP_ENABLE_OAUTH21 +
+  # WORKSPACE_MCP_STATELESS_MODE verifies the Bearer token on every
+  # request via Google's userinfo endpoint. GOOGLE_OAUTH_CLIENT_ID /
+  # GOOGLE_OAUTH_CLIENT_SECRET are inherited from the container env.
+  - name: google-workspace
+    type: python
+    port: 9001
+    path: /mcp
+    cwd: /opt/mcp-hub/python/google_workspace_mcp
+    command:
+      - .venv/bin/python
+      - main.py
+      - --transport
+      - streamable-http
+      - --tools
+      - gmail
+      - drive
+      - calendar
+    env:
+      WORKSPACE_MCP_PORT: "9001"
+      MCP_ENABLE_OAUTH21: "true"
+      WORKSPACE_MCP_STATELESS_MODE: "true"
+
+remotes:
+  - name: clickup
+    url: https://mcp.clickup.com/mcp
+  - name: hubspot
+    url: https://mcp.hubspot.com
+  - name: atlassian
+    url: https://mcp.atlassian.com/v1/mcp
+  - name: linear
+    url: https://mcp.linear.app/mcp
+  - name: notion
+    url: https://mcp.notion.com/mcp
+  - name: asana
+    url: https://mcp.asana.com/v2/mcp
+  - name: monday
+    url: https://mcp.monday.com/mcp
+  - name: context7
+    url: https://mcp.context7.com
+  - name: exa
+    url: https://mcp.exa.ai
+
+handles:
+  # ── Microsoft 365 (subprocess m365) ───────────────────────────────
+  outlook:
+    subprocess: m365
+    tools:
+      - add-mail-attachment
+      - create-draft-email
+      - create-forward-draft
+      - create-mail-attachment-upload-session
+      - create-mail-child-folder
+      - create-mail-folder
+      - create-mail-rule
+      - create-reply-all-draft
+      - create-reply-draft
+      - delete-mail-attachment
+      - delete-mail-folder
+      - delete-mail-message
+      - delete-mail-rule
+      - forward-mail-message
+      - get-mail-attachment
+      - get-mail-message
+      - get-mailbox-settings
+      - list-mail-attachments
+      - list-mail-child-folders
+      - list-mail-folder-messages
+      - list-mail-folders
+      - list-mail-messages
+      - list-mail-rules
+      - move-mail-message
+      - reply-all-mail-message
+      - reply-mail-message
+      - send-draft-message
+      - send-mail
+      - update-mail-folder
+      - update-mail-message
+      - update-mail-rule
+      - update-mailbox-settings
+
+  outlook-calendar:
+    subprocess: m365
+    tools:
+      - accept-calendar-event
+      - create-calendar
+      - create-calendar-event
+      - create-specific-calendar-event
+      - decline-calendar-event
+      - delete-calendar
+      - delete-calendar-event
+      - delete-specific-calendar-event
+      - get-calendar-event
+      - get-calendar-view
+      - get-schedule
+      - get-shared-calendar-view
+      - get-specific-calendar-event
+      - get-specific-calendar-view
+      - list-calendar-event-instances
+      - list-calendar-events
+      - list-calendars
+      - list-shared-calendar-events
+      - list-specific-calendar-events
+      - tentatively-accept-calendar-event
+      - update-calendar
+      - update-calendar-event
+      - update-specific-calendar-event
+
+  onedrive:
+    subprocess: m365
+    tools:
+      - create-onedrive-folder
+      - create-upload-session
+      - delete-drive-item-permission
+      - delete-onedrive-file
+      - download-onedrive-file-content
+      - get-drive-delta
+      - get-drive-item
+      - get-drive-root-item
+      - list-drive-item-permissions
+      - list-drive-item-versions
+      - list-drives
+      - list-folder-files
+      - move-rename-onedrive-item
+      - search-onedrive-files
+      - share-drive-item
+      - upload-file-content
+
+  sharepoint:
+    subprocess: m365
+    tools:
+      - create-sharepoint-list-item
+      - delete-sharepoint-list-item
+      - get-sharepoint-site
+      - get-sharepoint-site-by-path
+      - get-sharepoint-site-drive-by-id
+      - get-sharepoint-site-item
+      - get-sharepoint-site-list
+      - get-sharepoint-site-list-item
+      - get-sharepoint-sites-delta
+      - list-sharepoint-site-drives
+      - list-sharepoint-site-items
+      - list-sharepoint-site-list-items
+      - list-sharepoint-site-lists
+      - search-sharepoint-sites
+      - update-sharepoint-list-item
+
+  ms-teams:
+    subprocess: m365
+    tools:
+      - add-team-member
+      - create-online-meeting
+      - create-team-channel
+      - delete-online-meeting
+      - delete-team-channel
+      - find-meeting-times
+      - get-channel-files-folder
+      - get-channel-message
+      - get-chat
+      - get-chat-message
+      - get-group
+      - get-meeting-attendance-report
+      - get-meeting-recording
+      - get-meeting-recording-content
+      - get-meeting-transcript
+      - get-meeting-transcript-content
+      - get-online-meeting
+      - get-team
+      - get-team-channel
+      - list-channel-message-replies
+      - list-channel-messages
+      - list-channel-tabs
+      - list-chat-members
+      - list-chat-message-replies
+      - list-chat-messages
+      - list-chats
+      - list-group-conversations
+      - list-group-members
+      - list-group-owners
+      - list-group-threads
+      - list-groups
+      - list-meeting-attendance-records
+      - list-meeting-attendance-reports
+      - list-meeting-recordings
+      - list-meeting-transcripts
+      - list-online-meetings
+      - list-pinned-chat-messages
+      - list-team-channels
+      - list-team-members
+      - pin-chat-message
+      - remove-team-member
+      - reply-to-channel-message
+      - reply-to-chat-message
+      - reply-to-group-thread
+      - send-channel-message
+      - send-chat-message
+      - set-channel-message-reaction
+      - set-chat-message-reaction
+      - unpin-chat-message
+      - unset-channel-message-reaction
+      - unset-chat-message-reaction
+      - update-online-meeting
+      - update-team-channel
+
+  ms-excel:
+    subprocess: m365
+    tools:
+      - add-excel-table-rows
+      - create-excel-chart
+      - format-excel-range
+      - get-excel-range
+      - get-excel-table
+      - list-excel-table-rows
+      - list-excel-tables
+      - list-excel-worksheets
+      - sort-excel-range
+
+  # ── Google Workspace (subprocess google-workspace) ────────────────
+  google-drive:
+    subprocess: google-workspace
+    tools:
+      - copy_drive_file
+      - create_drive_file
+      - create_drive_folder
+      - get_drive_file_content
+      - get_drive_shareable_link
+      - import_to_google_doc
+      - list_drive_items
+      - manage_drive_access
+      - search_drive_files
+      - update_drive_file
+
+  gmail:
+    subprocess: google-workspace
+    tools:
+      - batch_modify_gmail_message_labels
+      - draft_gmail_message
+      - get_gmail_thread_content
+      - list_gmail_filters
+      - list_gmail_labels
+      - manage_gmail_filter
+      - manage_gmail_label
+      - modify_gmail_message_labels
+      - search_gmail_messages
+      - send_gmail_message
+
+  google-calendar:
+    subprocess: google-workspace
+    tools:
+      - create_calendar
+      - get_events
+      - list_calendars
+      - manage_event
+      - manage_focus_time
+      - manage_out_of_office
+      - query_freebusy
+
+  # ── Vendor-hosted remotes (no allow-list — vendor serves its own) ──
+  clickup:   { remote: clickup }
+  hubspot:   { remote: hubspot }
+  atlassian: { remote: atlassian }
+  linear:    { remote: linear }
+  notion:    { remote: notion }
+  asana:     { remote: asana }
+  monday:    { remote: monday }
+  context7:  { remote: context7 }
+  exa:       { remote: exa }
