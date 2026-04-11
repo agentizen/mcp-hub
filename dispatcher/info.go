@@ -60,7 +60,12 @@ func (d *Dispatcher) HandleInfo(w http.ResponseWriter, r *http.Request) {
 	}
 	copyRequestHeaders(outReq.Header, r.Header)
 	outReq.Header.Set("Content-Type", "application/json")
-	outReq.Header.Set("Accept", "application/json")
+	// The Streamable HTTP MCP transport spec requires clients to declare
+	// they accept BOTH application/json and text/event-stream — some
+	// vendor MCPs (e.g. Exa) enforce this and reject requests that only
+	// list application/json with a JSON-RPC 406. Advertise both so the
+	// /info probe works across every streamable-HTTP backend.
+	outReq.Header.Set("Accept", "application/json, text/event-stream")
 
 	resp, err := d.client.Do(outReq) // #nosec G107,G704 — target URL is resolved from static config (remote by name or 127.0.0.1:<subprocess-port>); consumer input never influences it
 	if err != nil {
