@@ -65,6 +65,8 @@ func run(ctx context.Context, cfg *Config, port int, logger *slog.Logger) error 
 	go pool.RunSweeper(sweepCtx)
 
 	mux := http.NewServeMux()
+	// /info is more specific than /mcp/ — Go 1.22 mux routes it first.
+	mux.HandleFunc("/mcp/{handle}/info", dispatcher.HandleInfo)
 	mux.Handle("/mcp/", dispatcher)
 	mux.HandleFunc("/health", NewHealthHandler(cfg))
 
