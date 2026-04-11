@@ -51,6 +51,9 @@ RUN apt-get update && \
 COPY --from=go-builder     /dispatcher                              /usr/local/bin/dispatcher
 COPY --from=node-builder   /opt/mcp-hub/node                        /opt/mcp-hub/node
 COPY --from=python-builder /opt/mcp-hub/python/google_workspace_mcp /opt/mcp-hub/python/google_workspace_mcp
+# The operator's own config.yaml is baked into the image at build time.
+# If config.yaml is missing, the build fails — you must copy
+# config.example.yaml → config.yaml and customize it first.
 COPY config.yaml                                                    /etc/mcp-hub/config.yaml
 
 RUN useradd --system --uid 1000 --home /opt/mcp-hub --shell /usr/sbin/nologin mcphub && \

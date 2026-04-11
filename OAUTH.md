@@ -150,7 +150,7 @@ docker run \
   -e GOOGLE_OAUTH_CLIENT_ID=... \
   -e GOOGLE_OAUTH_CLIENT_SECRET=... \
   -p 8090:8090 \
-  ghcr.io/agentizen/mcp-hub:<tag>
+  mcp-hub:local
 ```
 
 ---

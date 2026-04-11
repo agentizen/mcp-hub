@@ -17,8 +17,14 @@ import (
 func main() {
 	configPath := flag.String("config", "/etc/mcp-hub/config.yaml", "path to config.yaml")
 	validate := flag.Bool("validate", false, "validate config and exit")
+	printVersion := flag.Bool("version", false, "print version and exit")
 	portFlag := flag.Int("port", DefaultHTTPPort, "HTTP listen port")
 	flag.Parse()
+
+	if *printVersion {
+		fmt.Println(version)
+		return
+	}
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)

@@ -21,3 +21,11 @@ __pycache__/
 # Build / dist
 dist/
 build/
+
+# Operator-local runtime config. Copy config.example.yaml → config.yaml
+# and customize; never commit your production config (it may contain
+# sensitive subprocess env vars or proprietary handle names).
+config.yaml
+
+# Local env file (copy .env.example → .env and fill in secrets).
+.env

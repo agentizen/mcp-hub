@@ -1,14 +1,23 @@
 # mcp-hub — Development & CI Makefile
 #
-# Usage:
+# Quick start for operators:
+#   1.  cp config.example.yaml config.yaml   # edit to your needs
+#   2.  cp .env.example .env                 # fill in OAuth / API secrets
+#   3.  make docker                          # build mcp-hub:local
+#   4.  make run                             # run the image with your config
+#
+# Development targets:
 #   make              Run full validation pipeline (tidy + fmt + vet + lint + build + test)
 #   make ci-setup     Install CI tools (golangci-lint, gosec, goimports)
 #   make ci           Full CI pipeline (ci-setup + all + docker)
-#   make docker       Build the Docker image locally
-#   make validate-config  Validate config.yaml without starting the server
+#   make docker       Build the Docker image locally (tag: mcp-hub:local)
+#   make run          Run mcp-hub:local with ./.env mounted
+#   make validate-config  Validate your local config.yaml without starting the server
 
 COVERAGE_FILE := coverage.out
 DISPATCHER    := dispatcher
+IMAGE         ?= mcp-hub:local
+HOST_PORT     ?= 8090
 
 # ---------- Aggregate targets ----------
 
@@ -117,14 +126,45 @@ test-coverage-html: test-coverage
 
 .PHONY: validate-config
 validate-config:
+	@test -f config.yaml || { \
+	  echo "ERROR: config.yaml missing."; \
+	  echo "Copy the example and customize it first:"; \
+	  echo "    cp config.example.yaml config.yaml"; \
+	  exit 1; \
+	}
 	cd $(DISPATCHER) && go run . --config ../config.yaml --validate
 
 # ---------- Docker ----------
 
+# Fails fast if the operator hasn't created their own config.yaml from
+# the shipped example. The image always embeds the operator's config
+# at build time — there is no fallback.
 .PHONY: docker
 docker:
+	@test -f config.yaml || { \
+	  echo "ERROR: config.yaml missing."; \
+	  echo "Copy the example and customize it first:"; \
+	  echo "    cp config.example.yaml config.yaml"; \
+	  exit 1; \
+	}
 	@echo "--- docker build ---"
-	docker build -t mcp-hub:local .
+	docker build -t $(IMAGE) .
+
+# Run the freshly built image. .env is loaded at runtime because it
+# contains secrets that MUST NOT be baked into a shared layer.
+.PHONY: run
+run:
+	@test -f .env || { \
+	  echo "ERROR: .env missing."; \
+	  echo "Copy the example and fill in your secrets:"; \
+	  echo "    cp .env.example .env"; \
+	  exit 1; \
+	}
+	docker run --rm -it \
+		--name mcp-hub \
+		-p $(HOST_PORT):8090 \
+		--env-file .env \
+		$(IMAGE)
 
 # ---------- CI Setup ----------
 
