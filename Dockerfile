@@ -17,7 +17,7 @@ COPY node/package.json node/package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 
 # ── Stage 3: Python backend clone + uv sync ──────────────────────────
-FROM python:3.11-slim AS python-builder
+FROM python:3.14-slim AS python-builder
 RUN apt-get update && \
     apt-get install -y --no-install-recommends git ca-certificates && \
     rm -rf /var/lib/apt/lists/* && \
@@ -37,7 +37,7 @@ RUN git clone https://github.com/taylorwilsdon/google_workspace_mcp.git google_w
     rm -rf .git
 
 # ── Stage 4: Runtime ─────────────────────────────────────────────────
-FROM python:3.11-slim
+FROM python:3.14-slim
 
 # Install Node.js 22, curl (HEALTHCHECK), ca-certificates, and uv.
 RUN apt-get update && \
