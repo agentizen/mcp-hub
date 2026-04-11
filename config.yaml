@@ -1,0 +1,6 @@
+# mcp-hub runtime configuration — empty placeholder.
+# Populate with subprocesses, remotes, and handles before shipping.
+
+subprocesses: []
+remotes: []
+handles: {}

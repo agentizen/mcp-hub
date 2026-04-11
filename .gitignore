@@ -1,0 +1,23 @@
+# Go artifacts
+dispatcher/dispatcher
+dispatcher/coverage.out
+dispatcher/coverage.html
+*.test
+*.out
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Node / Python build artifacts (installed inside the Docker image;
+# package.json + package-lock.json are the only source of truth).
+node/node_modules/
+python/**/.venv/
+__pycache__/
+*.pyc
+
+# Build / dist
+dist/
+build/

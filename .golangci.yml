@@ -1,0 +1,32 @@
+version: "2"
+
+run:
+  timeout: 5m
+  go: "1.25"
+  tests: true
+
+linters:
+  default: none
+  enable:
+    - errcheck       # unchecked errors
+    - govet          # suspicious constructs
+    - staticcheck    # comprehensive static analysis (includes gosimple + unused)
+    - ineffassign    # ineffectual variable assignments
+    - misspell       # common spelling mistakes
+    - gocyclo        # cyclomatic complexity
+
+  settings:
+    gocyclo:
+      min-complexity: 60
+    misspell:
+      locale: US
+
+  exclusions:
+    rules:
+      - path: "_test\\.go"
+        linters:
+          - errcheck  # unchecked errors in test files are acceptable
+
+formatters:
+  enable:
+    - gofmt          # formatting compliance

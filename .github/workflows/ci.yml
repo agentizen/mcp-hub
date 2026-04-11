@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache-dependency-path: dispatcher/go.sum
+
+      - name: Install CI tools
+        run: make ci-setup
+
+      - name: Tidy
+        run: make tidy
+
+      - name: Format check
+        run: make fmt
+
+      - name: Vet
+        run: make vet
+
+      - name: Lint
+        run: make lint
+
+      - name: Security
+        run: make security
+
+      - name: Build
+        run: make build
+
+      - name: Test (race)
+        run: make test-race
+
+      - name: Test coverage
+        run: make test-coverage
