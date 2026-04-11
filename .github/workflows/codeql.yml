@@ -1,0 +1,72 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly deep scan on Monday 05:00 UTC (07:00 Europe/Paris),
+    # ahead of the Dependabot PR wave that lands at 06:00 Europe/Paris.
+    - cron: "0 5 * * 1"
+
+# Cancel in-flight scans on the same ref when a new commit arrives —
+# avoids wasting CI minutes on stacked pushes.
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      # Required to upload SARIF results to the Security tab.
+      security-events: write
+      # Required to read the repository contents.
+      contents: read
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # Only Go is tracked here. The Node directory contains package
+        # manifests but no first-party source — the vendored MCP
+        # servers live in node_modules and are covered by Dependabot
+        # advisories, not CodeQL. The Python code is cloned from its
+        # upstream repo at image build time and is therefore scanned
+        # in the upstream project, not here.
+        include:
+          - language: go
+            build-mode: manual
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        if: matrix.language == 'go'
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache-dependency-path: dispatcher/go.sum
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          # Security + quality query pack; drops the noisy "extended"
+          # suite. Tune here if you want stricter rules.
+          queries: security-and-quality
+
+      - name: Build Go dispatcher
+        if: matrix.language == 'go'
+        run: |
+          cd dispatcher
+          go build ./...
+
+      - name: Run CodeQL analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"
