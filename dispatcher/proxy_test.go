@@ -214,6 +214,93 @@ func TestProxy_ToolCallAllowList_AllowsListed(t *testing.T) {
 	}
 }
 
+func TestProxy_ResolveTarget_UnknownSubprocess_Returns500(t *testing.T) {
+	// Config references a subprocess that is not in pool.configs.
+	cfg := &Config{
+		Handles: map[string]HandleConfig{"h": {Subprocess: "ghost"}},
+	}
+	d := NewDispatcher(cfg, NewPool(nil, newTestLogger()), newTestLogger())
+
+	req := httptest.NewRequest(http.MethodPost, "/mcp/h", strings.NewReader(`{}`))
+	rr := httptest.NewRecorder()
+	d.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Errorf("code = %d, want 500 for config lookup failure", rr.Code)
+	}
+}
+
+func TestProxy_ResolveTarget_UnknownRemote_Returns500(t *testing.T) {
+	cfg := &Config{
+		Handles: map[string]HandleConfig{"h": {Remote: "ghost"}},
+	}
+	d := NewDispatcher(cfg, NewPool(nil, newTestLogger()), newTestLogger())
+
+	req := httptest.NewRequest(http.MethodPost, "/mcp/h", strings.NewReader(`{}`))
+	rr := httptest.NewRecorder()
+	d.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Errorf("code = %d, want 500 for config lookup failure", rr.Code)
+	}
+}
+
+func TestProxy_ToolsListFilterError_Returns502(t *testing.T) {
+	// Upstream returns a malformed result shape while the handle has an
+	// allow-list — the dispatcher must fail-closed to prevent bypass.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"result":"unexpected-string"}`))
+	}))
+	defer srv.Close()
+
+	cfg := &Config{
+		Remotes: []RemoteConfig{{Name: "r", URL: srv.URL}},
+		Handles: map[string]HandleConfig{
+			"h": {Remote: "r", ToolSet: map[string]bool{"a": true}},
+		},
+	}
+	d := NewDispatcher(cfg, NewPool(nil, newTestLogger()), newTestLogger())
+
+	body := []byte(`{"method":"tools/list"}`)
+	req := httptest.NewRequest(http.MethodPost, "/mcp/h", bytes.NewReader(body))
+	rr := httptest.NewRecorder()
+	d.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadGateway {
+		t.Errorf("code = %d, want 502 when filter fails closed — body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestProxy_SubprocessHandle_UsesConfiguredPath(t *testing.T) {
+	var receivedPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedPath = r.URL.Path
+		_, _ = w.Write([]byte(`{"result":"ok"}`))
+	}))
+	defer srv.Close()
+
+	port := httptestPort(t, srv)
+	subCfg := SubprocessConfig{Name: "sub", Port: port, Path: "/", Command: []string{"sleep", "30"}}
+	cfg := &Config{
+		Subprocesses: []SubprocessConfig{subCfg},
+		Handles:      map[string]HandleConfig{"h": {Subprocess: "sub"}},
+	}
+	pool := NewPool(cfg.Subprocesses, newTestLogger())
+	pool.mu.Lock()
+	pool.subprocesses["sub"] = fakeRunningSubprocess(subCfg)
+	pool.mu.Unlock()
+
+	d := NewDispatcher(cfg, pool, newTestLogger())
+	req := httptest.NewRequest(http.MethodPost, "/mcp/h", strings.NewReader(`{}`))
+	rr := httptest.NewRecorder()
+	d.ServeHTTP(rr, req)
+
+	if receivedPath != "/" {
+		t.Errorf("upstream path = %q, want / (from cfg.Path)", receivedPath)
+	}
+}
+
 func TestProxy_ToolsListResponse_IsFiltered(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

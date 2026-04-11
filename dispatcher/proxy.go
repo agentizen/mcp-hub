@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -57,7 +58,8 @@ func (d *Dispatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Read and size-cap the body.
 	body, err := io.ReadAll(io.LimitReader(r.Body, int64(MaxRequestBodyBytes)+1))
 	if err != nil {
-		http.Error(w, "read body: "+err.Error(), http.StatusBadRequest)
+		d.logger.Warn("read body", "handle", handle, "err", err)
+		http.Error(w, "bad request body", http.StatusBadRequest)
 		return
 	}
 	if len(body) > MaxRequestBodyBytes {
@@ -76,13 +78,20 @@ func (d *Dispatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	target, err := d.resolveTarget(r.Context(), &hcfg)
 	if err != nil {
 		d.logger.Warn("resolve target", "handle", handle, "err", err)
-		http.Error(w, "resolve target: "+err.Error(), http.StatusBadGateway)
+		status := http.StatusBadGateway
+		if errors.Is(err, errConfigLookup) {
+			// Handle references an entry that doesn't exist in the
+			// config — operator error, not upstream failure.
+			status = http.StatusInternalServerError
+		}
+		http.Error(w, http.StatusText(status), status)
 		return
 	}
 
 	outReq, err := http.NewRequestWithContext(r.Context(), r.Method, target, bytes.NewReader(body))
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		d.logger.Warn("build upstream request", "handle", handle, "err", err)
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
 	copyRequestHeaders(outReq.Header, r.Header)
@@ -96,15 +105,23 @@ func (d *Dispatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer func() { _ = resp.Body.Close() }()
 
 	// If this is a tools/list response AND the handle has an allow-list AND
-	// the upstream says it's JSON, buffer and filter.
+	// the upstream says it's JSON, buffer and filter. Fail-closed on any
+	// filtering error so disallowed tools never leak to the consumer.
 	if d.shouldFilterResponse(body, &hcfg, resp) {
 		respBody, rerr := io.ReadAll(resp.Body)
 		if rerr != nil {
-			http.Error(w, "upstream read: "+rerr.Error(), http.StatusBadGateway)
+			d.logger.Warn("upstream read", "handle", handle, "err", rerr)
+			http.Error(w, "upstream error", http.StatusBadGateway)
+			return
+		}
+		newBody, filtered, ferr := FilterToolsListResponse(respBody, hcfg.ToolSet)
+		if ferr != nil {
+			d.logger.Warn("tools/list filter failed", "handle", handle, "err", ferr)
+			http.Error(w, "upstream error", http.StatusBadGateway)
 			return
 		}
 		out := respBody
-		if newBody, filtered, ferr := FilterToolsListResponse(respBody, hcfg.ToolSet); ferr == nil && filtered {
+		if filtered {
 			out = newBody
 		}
 		copyHeaders(w.Header(), resp.Header, "Content-Length")
@@ -132,21 +149,31 @@ func (d *Dispatcher) shouldFilterResponse(reqBody []byte, h *HandleConfig, resp 
 	return strings.Contains(resp.Header.Get("Content-Type"), "application/json")
 }
 
+// errConfigLookup wraps errors that indicate the handle references a
+// backend entry that is not present in the loaded config. Translates
+// to HTTP 500 (operator error) rather than 502 (upstream failure).
+var errConfigLookup = errors.New("config lookup failure")
+
 // resolveTarget returns the absolute URL to forward the request to.
+// For subprocess handles it lazily spawns the backend via the pool and
+// honors the optional cfg.Path override; defaults to /mcp.
 func (d *Dispatcher) resolveTarget(ctx context.Context, h *HandleConfig) (string, error) {
 	if h.Subprocess != "" {
 		sp, err := d.pool.GetOrSpawn(ctx, h.Subprocess)
 		if err != nil {
+			if errors.Is(err, ErrUnknownSubprocess) {
+				return "", fmt.Errorf("%w: subprocess %q", errConfigLookup, h.Subprocess)
+			}
 			return "", err
 		}
-		return fmt.Sprintf("http://127.0.0.1:%d/mcp", sp.Port()), nil
+		return fmt.Sprintf("http://127.0.0.1:%d%s", sp.Port(), sp.Path()), nil
 	}
 	for _, r := range d.cfg.Remotes {
 		if r.Name == h.Remote {
 			return r.URL, nil
 		}
 	}
-	return "", fmt.Errorf("remote %q not found", h.Remote)
+	return "", fmt.Errorf("%w: remote %q", errConfigLookup, h.Remote)
 }
 
 // extractHandle parses a /mcp/<handle> path. Returns "", false when the

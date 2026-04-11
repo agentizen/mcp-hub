@@ -9,6 +9,11 @@ import (
 	"time"
 )
 
+// ErrUnknownSubprocess is returned when GetOrSpawn is asked for a name
+// that is not present in the loaded config. Callers use errors.Is to
+// distinguish this from runtime failures.
+var ErrUnknownSubprocess = errors.New("pool: unknown subprocess")
+
 // subprocessFactory builds a fresh Subprocess from a config. Pluggable
 // so tests can inject probes and shortened timeouts.
 type subprocessFactory func(cfg SubprocessConfig, logger *slog.Logger) *Subprocess
@@ -110,7 +115,7 @@ func (p *Pool) getOrCreateEntry(name string) (*Subprocess, error) {
 	}
 	cfg, known := p.configs[name]
 	if !known {
-		return nil, fmt.Errorf("pool: unknown subprocess %q", name)
+		return nil, fmt.Errorf("%w: %q", ErrUnknownSubprocess, name)
 	}
 	sp = p.factory(cfg, p.logger)
 	p.subprocesses[name] = sp
@@ -125,16 +130,24 @@ func (p *Pool) Sweep() {
 
 // sweepAt is the testable variant of Sweep: it lets tests pass a
 // controlled "now" value.
+//
+// Contract: Pool.mu and Subprocess.mu are NEVER held simultaneously.
+// We first snapshot the full subprocess set under p.mu, release the
+// lock, THEN call isIdle (which acquires Subprocess.mu) on each entry.
 func (p *Pool) sweepAt(now time.Time) {
-	// Snapshot idle candidates under lock, then release before stopping.
 	p.mu.Lock()
-	candidates := make([]*Subprocess, 0)
+	all := make([]*Subprocess, 0, len(p.subprocesses))
 	for _, sp := range p.subprocesses {
+		all = append(all, sp)
+	}
+	p.mu.Unlock()
+
+	candidates := make([]*Subprocess, 0, len(all))
+	for _, sp := range all {
 		if sp.isIdle(now) {
 			candidates = append(candidates, sp)
 		}
 	}
-	p.mu.Unlock()
 
 	for _, sp := range candidates {
 		if err := sp.Stop(context.Background()); err != nil && !errors.Is(err, ErrSubprocessBusy) {
@@ -158,9 +171,9 @@ func (p *Pool) RunSweeper(ctx context.Context) {
 	}
 }
 
-// Shutdown stops every running subprocess. Honors the caller's ctx for
-// the overall deadline; individual Stop calls are bounded by
-// SubprocessStopTimeout.
+// Shutdown drains every subprocess regardless of state. Starting
+// subprocesses are force-killed via Subprocess.drainAndStop so the OS
+// process never outlives the dispatcher.
 func (p *Pool) Shutdown(ctx context.Context) {
 	p.mu.Lock()
 	targets := make([]*Subprocess, 0, len(p.subprocesses))
@@ -174,13 +187,7 @@ func (p *Pool) Shutdown(ctx context.Context) {
 		wg.Add(1)
 		go func(s *Subprocess) {
 			defer wg.Done()
-			state, _, _ := s.snapshot()
-			if state != StateRunning {
-				return
-			}
-			if err := s.Stop(ctx); err != nil && !errors.Is(err, ErrSubprocessBusy) {
-				p.logger.Warn("shutdown stop failed", "name", s.Name(), "err", err)
-			}
+			s.drainAndStop(ctx)
 		}(sp)
 	}
 

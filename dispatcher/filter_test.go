@@ -119,6 +119,37 @@ func TestFilterToolsListResponse_NonJSON(t *testing.T) {
 	}
 }
 
+// TestFilterToolsListResponse_ResultNotObject_FailsClosed asserts the
+// caller receives an error when the upstream returns a result that
+// isn't a JSON object. Previously the filter would silently pass
+// through, which could bypass the allow-list.
+func TestFilterToolsListResponse_ResultNotObject_FailsClosed(t *testing.T) {
+	body := []byte(`{"jsonrpc":"2.0","result":"unexpected-string"}`)
+	_, filtered, err := FilterToolsListResponse(body, map[string]bool{"a": true})
+	if err == nil {
+		t.Error("want error when result is not an object")
+	}
+	if filtered {
+		t.Error("filtered should be false when the filter errors")
+	}
+}
+
+func TestFilterToolsListResponse_ResultMissingToolsKey_FailsClosed(t *testing.T) {
+	body := []byte(`{"result":{"unexpected":42}}`)
+	_, _, err := FilterToolsListResponse(body, map[string]bool{"a": true})
+	if err == nil {
+		t.Error("want error when result has no tools key")
+	}
+}
+
+func TestFilterToolsListResponse_ToolsNotArray_FailsClosed(t *testing.T) {
+	body := []byte(`{"result":{"tools":"not-an-array"}}`)
+	_, _, err := FilterToolsListResponse(body, map[string]bool{"a": true})
+	if err == nil {
+		t.Error("want error when tools is not an array")
+	}
+}
+
 func TestFilterToolsListResponse_ErrorEnvelope_PassesThrough(t *testing.T) {
 	body := []byte(`{"jsonrpc":"2.0","id":1,"error":{"code":-1,"message":"boom"}}`)
 	_, filtered, err := FilterToolsListResponse(body, map[string]bool{"a": true})

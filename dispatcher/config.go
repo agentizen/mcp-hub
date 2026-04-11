@@ -21,6 +21,7 @@ type SubprocessConfig struct {
 	Name    string            `yaml:"name"`
 	Type    string            `yaml:"type"` // "node" | "python" — informational only
 	Port    int               `yaml:"port"`
+	Path    string            `yaml:"path,omitempty"` // upstream URL path; defaults to /mcp
 	Cwd     string            `yaml:"cwd"`
 	Command []string          `yaml:"command"`
 	Env     map[string]string `yaml:"env,omitempty"`

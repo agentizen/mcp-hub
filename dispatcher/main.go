@@ -29,6 +29,16 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Config validates subprocess ports against DefaultHTTPPort, but the
+	// operator can override the listen port via --port. Re-check against
+	// the effective value.
+	for _, sp := range cfg.Subprocesses {
+		if sp.Port == *portFlag {
+			logger.Error("subprocess port collides with --port", "subprocess", sp.Name, "port", sp.Port)
+			os.Exit(1)
+		}
+	}
+
 	if *validate {
 		logger.Info("config valid", "handles", len(cfg.Handles))
 		return

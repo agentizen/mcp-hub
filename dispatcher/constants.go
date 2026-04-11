@@ -27,6 +27,10 @@ const (
 	// PoolRetryAttempts caps Pool.GetOrSpawn retry loops.
 	PoolRetryAttempts = 3
 
-	// readyPollInterval is the interval between readiness TCP-connect probes.
+	// readyPollInterval is the wait between failed TCP-connect attempts.
 	readyPollInterval = 500 * time.Millisecond
+
+	// readyDialTimeout is the per-attempt dial timeout inside the probe.
+	// Kept short so the effective cadence is close to readyPollInterval.
+	readyDialTimeout = 100 * time.Millisecond
 )

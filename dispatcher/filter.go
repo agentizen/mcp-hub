@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 )
 
@@ -57,40 +58,50 @@ func CheckToolCallAllowed(name string, allowed map[string]bool) bool {
 }
 
 // FilterToolsListResponse filters a `tools/list` JSON-RPC response body,
-// removing any tool whose name is not in the allow-set. When allowed is
-// empty, returns (nil, false, nil) meaning "caller should pass the
-// original body through". When filtering happens, returns (newBody, true, nil).
+// removing any tool whose name is not in the allow-set. Semantics:
+//
+//   - Empty allow-set  → (nil, false, nil) : caller passes the original
+//     body through unchanged.
+//   - JSON-RPC error envelope (no "result" key) → (nil, false, nil) :
+//     caller passes it through. Errors don't leak disallowed tools.
+//   - Valid tools list → (newBody, true, nil) : caller writes newBody.
+//   - Any other malformed / unexpected shape → (nil, false, error) :
+//     caller MUST fail-closed (502) to prevent allow-list bypass.
 func FilterToolsListResponse(body []byte, allowed map[string]bool) ([]byte, bool, error) {
 	if len(allowed) == 0 {
 		return nil, false, nil
 	}
-	// We unmarshal into a flexible envelope so we can preserve unknown
-	// JSON-RPC fields (id, jsonrpc, error, etc.).
+	// Flexible envelope so we preserve unknown JSON-RPC fields.
 	var envelope map[string]json.RawMessage
 	if err := json.Unmarshal(body, &envelope); err != nil {
-		return nil, false, fmt.Errorf("tools/list response: %w", err)
+		return nil, false, fmt.Errorf("tools/list envelope: %w", err)
 	}
 	resultRaw, ok := envelope["result"]
 	if !ok {
-		// Error response or unexpected shape — pass through.
+		// Error envelope (or ping/notification response) — pass through.
 		return nil, false, nil
 	}
-	var result struct {
-		Tools []json.RawMessage `json:"tools"`
+	var resultObj map[string]json.RawMessage
+	if err := json.Unmarshal(resultRaw, &resultObj); err != nil {
+		return nil, false, fmt.Errorf("tools/list result shape: %w", err)
 	}
-	if err := json.Unmarshal(resultRaw, &result); err != nil {
-		return nil, false, nil
+	toolsRaw, hasTools := resultObj["tools"]
+	if !hasTools {
+		// result without tools key — unexpected; fail-closed.
+		return nil, false, errors.New("tools/list result missing tools field")
 	}
-	if len(result.Tools) == 0 {
-		return nil, false, nil
+	var toolsArr []json.RawMessage
+	if err := json.Unmarshal(toolsRaw, &toolsArr); err != nil {
+		return nil, false, fmt.Errorf("tools/list tools array: %w", err)
 	}
 
-	kept := make([]json.RawMessage, 0, len(result.Tools))
-	for _, raw := range result.Tools {
+	kept := make([]json.RawMessage, 0, len(toolsArr))
+	for _, raw := range toolsArr {
 		var meta struct {
 			Name string `json:"name"`
 		}
 		if err := json.Unmarshal(raw, &meta); err != nil {
+			// Drop malformed tool entries rather than leaking them.
 			continue
 		}
 		if allowed[meta.Name] {
@@ -98,11 +109,6 @@ func FilterToolsListResponse(body []byte, allowed map[string]bool) ([]byte, bool
 		}
 	}
 
-	// Rebuild the result object preserving unknown fields.
-	var resultObj map[string]json.RawMessage
-	if err := json.Unmarshal(resultRaw, &resultObj); err != nil {
-		return nil, false, nil
-	}
 	keptBytes, err := json.Marshal(kept)
 	if err != nil {
 		return nil, false, err
