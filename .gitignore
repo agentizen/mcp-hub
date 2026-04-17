@@ -2,6 +2,7 @@
 dispatcher/dispatcher
 dispatcher/coverage.out
 dispatcher/coverage.html
+dispatcher/vendor
 *.test
 *.out
 

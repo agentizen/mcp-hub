@@ -42,7 +42,7 @@ tidy:
 .PHONY: fmt
 fmt:
 	@echo "--- gofmt check ---"
-	@BADFILES=$$(find $(DISPATCHER) -type f -name '*.go' | xargs gofmt -l); \
+	@BADFILES=$$(find $(DISPATCHER) -type f -name '*.go' -not -path './.git/*' -not -path './vendor/*' | xargs gofmt -l); \
 	if [ -n "$$BADFILES" ]; then \
 		echo "Files need gofmt:"; echo "$$BADFILES"; exit 1; \
 	fi
@@ -50,7 +50,7 @@ fmt:
 
 .PHONY: fmt-fix
 fmt-fix:
-	find $(DISPATCHER) -type f -name '*.go' | xargs gofmt -s -w
+	find $(DISPATCHER) -type f -name '*.go' -not -path './.git/*' -not -path './vendor/*' | xargs gofmt -s -w
 
 # ---------- Imports ----------
 
