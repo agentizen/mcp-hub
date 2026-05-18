@@ -8,6 +8,6 @@
     "node": ">=22"
   },
   "dependencies": {
-    "@softeria/ms-365-mcp-server": "0.107.1"
+    "@softeria/ms-365-mcp-server": "0.108.0"
   }
 }
