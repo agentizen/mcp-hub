@@ -333,6 +333,235 @@ func TestProxy_ToolsListResponse_IsFiltered(t *testing.T) {
 	}
 }
 
+func TestProxy_ToolsListResponse_IsFiltered_SSE(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"tools\":[{\"name\":\"a\"},{\"name\":\"b\"},{\"name\":\"c\"}]}}\n\n"))
+	}))
+	defer srv.Close()
+
+	cfg := &Config{
+		Remotes: []RemoteConfig{{Name: "r", URL: srv.URL}},
+		Handles: map[string]HandleConfig{
+			"h": {Remote: "r", ToolSet: map[string]bool{"a": true}},
+		},
+	}
+	d := NewDispatcher(cfg, NewPool(nil, newTestLogger()), newTestLogger())
+
+	body := []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)
+	req := httptest.NewRequest(http.MethodPost, "/mcp/h", bytes.NewReader(body))
+	rr := httptest.NewRecorder()
+	d.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("code = %d, want 200", rr.Code)
+	}
+	if !strings.Contains(rr.Header().Get("Content-Type"), "text/event-stream") {
+		t.Errorf("Content-Type = %q, want text/event-stream", rr.Header().Get("Content-Type"))
+	}
+	rb := rr.Body.String()
+	if !strings.HasPrefix(rb, "data: ") {
+		t.Errorf("SSE body missing data: prefix: %q", rb)
+	}
+	if !strings.Contains(rb, `"name":"a"`) {
+		t.Errorf("response missing tool 'a': %s", rb)
+	}
+	if strings.Contains(rb, `"b"`) || strings.Contains(rb, `"c"`) {
+		t.Errorf("response still contains disallowed tools: %s", rb)
+	}
+}
+
+func TestProxy_ToolsListResponse_SSE_ErrorEnvelope_PassesThrough(t *testing.T) {
+	upstream := "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32601,\"message\":\"method not found\"}}\n\n"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(upstream))
+	}))
+	defer srv.Close()
+
+	cfg := &Config{
+		Remotes: []RemoteConfig{{Name: "r", URL: srv.URL}},
+		Handles: map[string]HandleConfig{
+			"h": {Remote: "r", ToolSet: map[string]bool{"a": true}},
+		},
+	}
+	d := NewDispatcher(cfg, NewPool(nil, newTestLogger()), newTestLogger())
+
+	body := []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)
+	req := httptest.NewRequest(http.MethodPost, "/mcp/h", bytes.NewReader(body))
+	rr := httptest.NewRecorder()
+	d.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("code = %d, want 200 for error envelope pass-through", rr.Code)
+	}
+	if rr.Body.String() != upstream {
+		t.Errorf("error envelope not forwarded verbatim:\n got %q\nwant %q", rr.Body.String(), upstream)
+	}
+}
+
+func TestProxy_ToolsListResponse_SSE_Malformed_Returns502(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: not-json\n\n"))
+	}))
+	defer srv.Close()
+
+	cfg := &Config{
+		Remotes: []RemoteConfig{{Name: "r", URL: srv.URL}},
+		Handles: map[string]HandleConfig{
+			"h": {Remote: "r", ToolSet: map[string]bool{"a": true}},
+		},
+	}
+	d := NewDispatcher(cfg, NewPool(nil, newTestLogger()), newTestLogger())
+
+	body := []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)
+	req := httptest.NewRequest(http.MethodPost, "/mcp/h", bytes.NewReader(body))
+	rr := httptest.NewRecorder()
+	d.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadGateway {
+		t.Errorf("code = %d, want 502 when SSE payload is malformed", rr.Code)
+	}
+}
+
+func TestProxy_ToolsListResponse_JSONCharset_IsFiltered(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"a"},{"name":"b"}]}}`))
+	}))
+	defer srv.Close()
+
+	cfg := &Config{
+		Remotes: []RemoteConfig{{Name: "r", URL: srv.URL}},
+		Handles: map[string]HandleConfig{
+			"h": {Remote: "r", ToolSet: map[string]bool{"a": true}},
+		},
+	}
+	d := NewDispatcher(cfg, NewPool(nil, newTestLogger()), newTestLogger())
+
+	body := []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)
+	req := httptest.NewRequest(http.MethodPost, "/mcp/h", bytes.NewReader(body))
+	rr := httptest.NewRecorder()
+	d.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("code = %d, want 200", rr.Code)
+	}
+	rb := rr.Body.String()
+	if strings.Contains(rb, `"b"`) {
+		t.Errorf("charset-qualified JSON still contains disallowed tools: %s", rb)
+	}
+}
+
+func TestProxy_PerHandleTimeout_Returns502(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(300 * time.Millisecond)
+		_, _ = w.Write([]byte(`{"result":"late"}`))
+	}))
+	defer srv.Close()
+
+	cfg := &Config{
+		Remotes: []RemoteConfig{{Name: "r", URL: srv.URL}},
+		Handles: map[string]HandleConfig{
+			"h": {Remote: "r", ResolvedTimeout: 50 * time.Millisecond},
+		},
+	}
+	d := NewDispatcher(cfg, NewPool(nil, newTestLogger()), newTestLogger())
+
+	start := time.Now()
+	req := httptest.NewRequest(http.MethodPost, "/mcp/h", strings.NewReader(`{"method":"ping"}`))
+	rr := httptest.NewRecorder()
+	d.ServeHTTP(rr, req)
+	elapsed := time.Since(start)
+
+	if rr.Code != http.StatusBadGateway {
+		t.Errorf("code = %d, want 502 on per-handle timeout (body=%s)", rr.Code, rr.Body.String())
+	}
+	if elapsed > 250*time.Millisecond {
+		t.Errorf("per-handle timeout not honored: took %v, want ~50ms", elapsed)
+	}
+}
+
+func TestProxy_ResponseTooLarge_PassThrough_Returns502(t *testing.T) {
+	cap := 1 << 16
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(bytes.Repeat([]byte("A"), cap+1))
+	}))
+	defer srv.Close()
+
+	cfg := &Config{
+		Remotes: []RemoteConfig{{Name: "r", URL: srv.URL}},
+		Handles: map[string]HandleConfig{
+			"h": {Remote: "r", ResolvedMaxBytes: cap},
+		},
+	}
+	d := NewDispatcher(cfg, NewPool(nil, newTestLogger()), newTestLogger())
+
+	req := httptest.NewRequest(http.MethodPost, "/mcp/h", strings.NewReader(`{"method":"ping"}`))
+	rr := httptest.NewRecorder()
+	d.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadGateway {
+		t.Errorf("code = %d, want 502 when pass-through response exceeds cap", rr.Code)
+	}
+}
+
+func TestProxy_ResponseWithinCap_PassesThrough(t *testing.T) {
+	cap := 1 << 12
+	payload := bytes.Repeat([]byte("Y"), 777)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		_, _ = w.Write(payload)
+	}))
+	defer srv.Close()
+
+	cfg := &Config{
+		Remotes: []RemoteConfig{{Name: "r", URL: srv.URL}},
+		Handles: map[string]HandleConfig{
+			"h": {Remote: "r", ResolvedMaxBytes: cap},
+		},
+	}
+	d := NewDispatcher(cfg, NewPool(nil, newTestLogger()), newTestLogger())
+
+	req := httptest.NewRequest(http.MethodPost, "/mcp/h", strings.NewReader(`{"method":"ping"}`))
+	rr := httptest.NewRecorder()
+	d.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("code = %d, want 200 — body=%s", rr.Code, rr.Body.String())
+	}
+	if !bytes.Equal(rr.Body.Bytes(), payload) {
+		t.Errorf("pass-through body mutated: got %d bytes, want %d", len(rr.Body.Bytes()), len(payload))
+	}
+}
+
+func TestProxy_ResponseTooLarge_FilterPath_Returns502(t *testing.T) {
+	cap := 1 << 12
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(bytes.Repeat([]byte("Z"), cap+1))
+	}))
+	defer srv.Close()
+
+	cfg := &Config{
+		Remotes: []RemoteConfig{{Name: "r", URL: srv.URL}},
+		Handles: map[string]HandleConfig{
+			"h": {Remote: "r", ToolSet: map[string]bool{"a": true}, ResolvedMaxBytes: cap},
+		},
+	}
+	d := NewDispatcher(cfg, NewPool(nil, newTestLogger()), newTestLogger())
+
+	body := []byte(`{"method":"tools/list"}`)
+	req := httptest.NewRequest(http.MethodPost, "/mcp/h", bytes.NewReader(body))
+	rr := httptest.NewRecorder()
+	d.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadGateway {
+		t.Errorf("code = %d, want 502 when filter-path response exceeds cap", rr.Code)
+	}
+}
+
 func TestExtractHandle(t *testing.T) {
 	cases := []struct {
 		in     string

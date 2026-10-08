@@ -15,7 +15,8 @@ const (
 	// SubprocessStopTimeout is the SIGTERM grace period before SIGKILL.
 	SubprocessStopTimeout = 10 * time.Second
 
-	// RequestForwardTimeout bounds a single proxied request.
+	// RequestForwardTimeout bounds a single proxied request. It is the
+	// fallback default when no handle/backend timeout_seconds resolves.
 	RequestForwardTimeout = 5 * time.Minute
 
 	// DefaultHTTPPort is the dispatcher's public listen port.
@@ -23,6 +24,11 @@ const (
 
 	// MaxRequestBodyBytes caps incoming request bodies at 10 MiB.
 	MaxRequestBodyBytes = 10 << 20
+
+	// MaxResponseBodyBytes caps upstream response bodies at 10 MiB,
+	// mirroring the deleted SDK MCP client's cap. Oversized responses
+	// fail closed with 502 instead of being forwarded.
+	MaxResponseBodyBytes = 10 << 20
 
 	// PoolRetryAttempts caps Pool.GetOrSpawn retry loops.
 	PoolRetryAttempts = 3

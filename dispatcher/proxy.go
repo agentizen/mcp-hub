@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"mime"
 	"net/http"
 	"strconv"
 	"strings"
@@ -36,6 +37,20 @@ func NewDispatcher(cfg *Config, pool *Pool, logger *slog.Logger) *Dispatcher {
 		},
 		logger: logger,
 	}
+}
+
+// clientFor returns a client honoring the handle's resolved request
+// timeout. The base client is a shared template; it is shallow-copied so
+// each handle's timeout applies while reusing the same Transport (and its
+// connection pool).
+func (d *Dispatcher) clientFor(h *HandleConfig) *http.Client {
+	if h.ResolvedTimeout <= 0 || h.ResolvedTimeout == d.client.Timeout {
+		return d.client
+	}
+	c := &http.Client{}
+	*c = *d.client
+	c.Timeout = h.ResolvedTimeout
+	return c
 }
 
 // ServeHTTP routes POST /mcp/<handle> → upstream backend.
@@ -96,7 +111,7 @@ func (d *Dispatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	copyRequestHeaders(outReq.Header, r.Header)
 
-	resp, err := d.client.Do(outReq) // #nosec G107,G704 — outbound URL is resolved from static config (named remote or 127.0.0.1:<subprocess-port>); consumer input never influences it
+	resp, err := d.clientFor(&hcfg).Do(outReq) // #nosec G107,G704 — outbound URL is resolved from static config (named remote or 127.0.0.1:<subprocess-port>); consumer input never influences it
 	if err != nil {
 		d.logger.Warn("upstream error", "handle", handle, "err", err)
 		http.Error(w, "upstream error", http.StatusBadGateway)
@@ -104,25 +119,34 @@ func (d *Dispatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
+	maxBytes := hcfg.ResolvedMaxBytes
+	if maxBytes <= 0 {
+		maxBytes = MaxResponseBodyBytes
+	}
+
 	// If this is a tools/list response AND the handle has an allow-list AND
-	// the upstream says it's JSON, buffer and filter. Fail-closed on any
-	// filtering error so disallowed tools never leak to the consumer.
+	// the upstream answers JSON or SSE, buffer and filter. Fail-closed on
+	// any filtering error so disallowed tools never leak to the consumer.
 	if d.shouldFilterResponse(body, &hcfg, resp) {
-		respBody, rerr := io.ReadAll(resp.Body)
+		respBody, rerr := io.ReadAll(io.LimitReader(resp.Body, int64(maxBytes)+1))
 		if rerr != nil {
 			d.logger.Warn("upstream read", "handle", handle, "err", rerr)
 			http.Error(w, "upstream error", http.StatusBadGateway)
 			return
 		}
-		newBody, filtered, ferr := FilterToolsListResponse(respBody, hcfg.ToolSet)
+		if len(respBody) > maxBytes {
+			d.logger.Warn("upstream response too large", "handle", handle, "bytes", len(respBody))
+			http.Error(w, "upstream response too large", http.StatusBadGateway)
+			return
+		}
+		out, filtered, ferr := d.filterToolsListBody(respBody, resp, &hcfg)
 		if ferr != nil {
 			d.logger.Warn("tools/list filter failed", "handle", handle, "err", ferr)
 			http.Error(w, "upstream error", http.StatusBadGateway)
 			return
 		}
-		out := respBody
-		if filtered {
-			out = newBody
+		if !filtered {
+			out = respBody
 		}
 		copyHeaders(w.Header(), resp.Header, "Content-Length")
 		w.Header().Set("Content-Length", strconv.Itoa(len(out)))
@@ -131,13 +155,56 @@ func (d *Dispatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	copyHeaders(w.Header(), resp.Header)
+	// Default pass-through: buffer within the cap so an oversized upstream
+	// response fails closed with 502 before any bytes are forwarded.
+	respBody, rerr := io.ReadAll(io.LimitReader(resp.Body, int64(maxBytes)+1))
+	if rerr != nil {
+		d.logger.Warn("upstream read", "handle", handle, "err", rerr)
+		http.Error(w, "upstream error", http.StatusBadGateway)
+		return
+	}
+	if len(respBody) > maxBytes {
+		d.logger.Warn("upstream response too large", "handle", handle, "bytes", len(respBody))
+		http.Error(w, "upstream response too large", http.StatusBadGateway)
+		return
+	}
+	copyHeaders(w.Header(), resp.Header, "Content-Length")
+	w.Header().Set("Content-Length", strconv.Itoa(len(respBody)))
 	w.WriteHeader(resp.StatusCode)
-	_, _ = io.Copy(w, resp.Body)
+	_, _ = w.Write(respBody)
+}
+
+// filterToolsListBody applies the handle's allow-list to a buffered
+// tools/list response, handling both application/json and
+// text/event-stream upstreams. It returns the body to send and whether
+// filtering actually happened; when the upstream answered SSE, the
+// filtered result is re-emitted as a single `data:` event. A JSON-RPC
+// error envelope passes through verbatim (filtered=false).
+func (d *Dispatcher) filterToolsListBody(respBody []byte, resp *http.Response, h *HandleConfig) ([]byte, bool, error) {
+	mt, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	if mt != "text/event-stream" {
+		return FilterToolsListResponse(respBody, h.ToolSet)
+	}
+	jsonBody, derr := DecodeSSEPayload(bytes.NewReader(respBody))
+	if derr != nil {
+		return nil, false, fmt.Errorf("decode SSE payload: %w", derr)
+	}
+	newBody, filtered, ferr := FilterToolsListResponse(jsonBody, h.ToolSet)
+	if ferr != nil {
+		return nil, false, ferr
+	}
+	if !filtered {
+		return respBody, false, nil
+	}
+	out, eerr := EncodeSSEPayload(newBody)
+	if eerr != nil {
+		return nil, false, eerr
+	}
+	return out, true, nil
 }
 
 // shouldFilterResponse returns true when the request was tools/list on
-// an allow-listed handle AND the upstream response is JSON.
+// an allow-listed handle AND the upstream response is JSON or SSE.
 func (d *Dispatcher) shouldFilterResponse(reqBody []byte, h *HandleConfig, resp *http.Response) bool {
 	if len(h.ToolSet) == 0 {
 		return false
@@ -146,7 +213,8 @@ func (d *Dispatcher) shouldFilterResponse(reqBody []byte, h *HandleConfig, resp 
 	if method != "tools/list" {
 		return false
 	}
-	return strings.Contains(resp.Header.Get("Content-Type"), "application/json")
+	mt, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	return mt == "application/json" || mt == "text/event-stream"
 }
 
 // errConfigLookup wraps errors that indicate the handle references a

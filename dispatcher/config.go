@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -16,21 +17,51 @@ type Config struct {
 	Handles      map[string]HandleConfig `yaml:"handles"`
 }
 
+// MaxTimeoutSeconds is the largest allowed explicit timeout_seconds value
+// (5 minutes — matches RequestForwardTimeout, the global fallback).
+const MaxTimeoutSeconds = 300
+
+// validateTimeoutSeconds enforces the 0 < t <= 5min rule. A zero value
+// means "unset" (fall back) and is always valid; negatives and values
+// beyond the global forward bound are rejected.
+func validateTimeoutSeconds(where string, t int) error {
+	if t < 0 {
+		return fmt.Errorf("config: %s: timeout_seconds must be >= 0, got %d", where, t)
+	}
+	if t > MaxTimeoutSeconds {
+		return fmt.Errorf("config: %s: timeout_seconds %d exceeds %d (5 min), use 0 for the global default", where, t, MaxTimeoutSeconds)
+	}
+	return nil
+}
+
+// validateMaxResponseBytes rejects negative explicit caps; zero means
+// "unset" and is valid.
+func validateMaxResponseBytes(where string, b int) error {
+	if b < 0 {
+		return fmt.Errorf("config: %s: max_response_bytes must be >= 0, got %d", where, b)
+	}
+	return nil
+}
+
 // SubprocessConfig describes a local subprocess backend.
 type SubprocessConfig struct {
-	Name    string            `yaml:"name"`
-	Type    string            `yaml:"type"` // "node" | "python" — informational only
-	Port    int               `yaml:"port"`
-	Path    string            `yaml:"path,omitempty"` // upstream URL path; defaults to /mcp
-	Cwd     string            `yaml:"cwd"`
-	Command []string          `yaml:"command"`
-	Env     map[string]string `yaml:"env,omitempty"`
+	Name             string            `yaml:"name"`
+	Type             string            `yaml:"type"` // "node" | "python" — informational only
+	Port             int               `yaml:"port"`
+	Path             string            `yaml:"path,omitempty"` // upstream URL path; defaults to /mcp
+	Cwd              string            `yaml:"cwd"`
+	Command          []string          `yaml:"command"`
+	Env              map[string]string `yaml:"env,omitempty"`
+	TimeoutSeconds   int               `yaml:"timeout_seconds,omitempty"`    // 0 = use global default
+	MaxResponseBytes int               `yaml:"max_response_bytes,omitempty"` // 0 = use global default
 }
 
 // RemoteConfig describes a vendor-hosted MCP backend reachable over HTTPS.
 type RemoteConfig struct {
-	Name string `yaml:"name"`
-	URL  string `yaml:"url"`
+	Name             string `yaml:"name"`
+	URL              string `yaml:"url"`
+	TimeoutSeconds   int    `yaml:"timeout_seconds,omitempty"`    // 0 = use global default
+	MaxResponseBytes int    `yaml:"max_response_bytes,omitempty"` // 0 = use global default
 }
 
 // HandleConfig is the public routing entry for a single handle.
@@ -39,12 +70,22 @@ type RemoteConfig struct {
 // is the allow-list that filters `tools/list` responses and gates
 // `tools/call` requests.
 type HandleConfig struct {
-	Subprocess string   `yaml:"subprocess,omitempty"`
-	Remote     string   `yaml:"remote,omitempty"`
-	Tools      []string `yaml:"tools,omitempty"`
+	Subprocess       string   `yaml:"subprocess,omitempty"`
+	Remote           string   `yaml:"remote,omitempty"`
+	Tools            []string `yaml:"tools,omitempty"`
+	TimeoutSeconds   int      `yaml:"timeout_seconds,omitempty"`    // 0 = fall back to backend / global default
+	MaxResponseBytes int      `yaml:"max_response_bytes,omitempty"` // 0 = fall back to backend / global default
 
 	// ToolSet is derived from Tools at load time. Empty means pass-through.
 	ToolSet map[string]bool `yaml:"-"`
+
+	// ResolvedTimeout is the effective per-handle forward timeout derived
+	// at load time (handle → backend → RequestForwardTimeout).
+	ResolvedTimeout time.Duration `yaml:"-"`
+
+	// ResolvedMaxBytes is the effective response-size cap derived at load
+	// time (handle → backend → MaxResponseBodyBytes).
+	ResolvedMaxBytes int `yaml:"-"`
 }
 
 // LoadConfig reads the given path, strictly decodes YAML, and runs all
@@ -67,6 +108,15 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, err
 	}
 
+	subByName := make(map[string]SubprocessConfig, len(cfg.Subprocesses))
+	for _, sp := range cfg.Subprocesses {
+		subByName[sp.Name] = sp
+	}
+	remoteByName := make(map[string]RemoteConfig, len(cfg.Remotes))
+	for _, r := range cfg.Remotes {
+		remoteByName[r.Name] = r
+	}
+
 	for name, h := range cfg.Handles {
 		if len(h.Tools) > 0 {
 			set := make(map[string]bool, len(h.Tools))
@@ -74,8 +124,48 @@ func LoadConfig(path string) (*Config, error) {
 				set[t] = true
 			}
 			h.ToolSet = set
-			cfg.Handles[name] = h
 		}
+
+		// Resolve per-handle timeout with nearest-global semantics:
+		// handle → backend → RequestForwardTimeout.
+		timeoutSeconds := h.TimeoutSeconds
+		if timeoutSeconds <= 0 {
+			if h.Subprocess != "" {
+				if sp, ok := subByName[h.Subprocess]; ok {
+					timeoutSeconds = sp.TimeoutSeconds
+				}
+			} else if h.Remote != "" {
+				if r, ok := remoteByName[h.Remote]; ok {
+					timeoutSeconds = r.TimeoutSeconds
+				}
+			}
+		}
+		if timeoutSeconds > 0 {
+			h.ResolvedTimeout = time.Duration(timeoutSeconds) * time.Second
+		} else {
+			h.ResolvedTimeout = RequestForwardTimeout
+		}
+
+		// Resolve per-handle response cap: handle → backend →
+		// MaxResponseBodyBytes.
+		maxBytes := h.MaxResponseBytes
+		if maxBytes <= 0 {
+			if h.Subprocess != "" {
+				if sp, ok := subByName[h.Subprocess]; ok {
+					maxBytes = sp.MaxResponseBytes
+				}
+			} else if h.Remote != "" {
+				if r, ok := remoteByName[h.Remote]; ok {
+					maxBytes = r.MaxResponseBytes
+				}
+			}
+		}
+		h.ResolvedMaxBytes = maxBytes
+		if h.ResolvedMaxBytes <= 0 {
+			h.ResolvedMaxBytes = MaxResponseBodyBytes
+		}
+
+		cfg.Handles[name] = h
 	}
 
 	return &cfg, nil
@@ -106,6 +196,12 @@ func (c *Config) validate() error {
 			return fmt.Errorf("config: subprocesses[%q]: port %d already used by %q", sp.Name, sp.Port, owner)
 		}
 		seenPorts[sp.Port] = sp.Name
+		if err := validateTimeoutSeconds(fmt.Sprintf("subprocesses[%q]", sp.Name), sp.TimeoutSeconds); err != nil {
+			return err
+		}
+		if err := validateMaxResponseBytes(fmt.Sprintf("subprocesses[%q]", sp.Name), sp.MaxResponseBytes); err != nil {
+			return err
+		}
 	}
 
 	remoteByName := make(map[string]struct{}, len(c.Remotes))
@@ -120,6 +216,12 @@ func (c *Config) validate() error {
 			return fmt.Errorf("config: remotes[%q]: missing url", r.Name)
 		}
 		remoteByName[r.Name] = struct{}{}
+		if err := validateTimeoutSeconds(fmt.Sprintf("remotes[%q]", r.Name), r.TimeoutSeconds); err != nil {
+			return err
+		}
+		if err := validateMaxResponseBytes(fmt.Sprintf("remotes[%q]", r.Name), r.MaxResponseBytes); err != nil {
+			return err
+		}
 	}
 
 	for name, h := range c.Handles {
@@ -140,6 +242,12 @@ func (c *Config) validate() error {
 			if _, ok := remoteByName[h.Remote]; !ok {
 				return fmt.Errorf("config: handles[%q]: unknown remote %q", name, h.Remote)
 			}
+		}
+		if err := validateTimeoutSeconds(fmt.Sprintf("handles[%q]", name), h.TimeoutSeconds); err != nil {
+			return err
+		}
+		if err := validateMaxResponseBytes(fmt.Sprintf("handles[%q]", name), h.MaxResponseBytes); err != nil {
+			return err
 		}
 	}
 
