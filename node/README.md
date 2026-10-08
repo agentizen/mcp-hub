@@ -49,7 +49,7 @@ least one) `subprocesses:` entry in `config.yaml`.
 
 | Package | Version | Handles |
 |---|---|---|
-| `@softeria/ms-365-mcp-server` | `0.75.0` | `outlook`, `outlook-calendar`, `onedrive`, `sharepoint`, `ms-teams`, `ms-excel` |
+| `@softeria/ms-365-mcp-server` | `0.159.1` | `outlook`, `outlook-calendar`, `onedrive`, `sharepoint`, `ms-teams`, `ms-excel` |
 
 The softeria server listens on `--http :PORT` with Streamable HTTP at
 `/mcp`. It validates the incoming `Authorization: Bearer` header against
