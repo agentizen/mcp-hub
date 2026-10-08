@@ -19,8 +19,9 @@ type InfoResponse struct {
 }
 
 // HandleInfo synthesizes a JSON-RPC tools/list request against the
-// handle's backend, applies the handle's allow-list, and wraps the
-// filtered tools in an InfoResponse envelope.
+// handle's backend, paginates through nextCursor results, applies the
+// handle's allow-list, and wraps the filtered tools in an InfoResponse
+// envelope.
 //
 // The caller's headers (Authorization, X-*) are forwarded verbatim to
 // the upstream backend so credential handling stays with the consumer.
@@ -49,75 +50,93 @@ func (d *Dispatcher) HandleInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Synthetic JSON-RPC tools/list request. id="info" so downstream
-	// logs can distinguish discovery probes from real calls.
-	reqBody := []byte(`{"jsonrpc":"2.0","id":"info","method":"tools/list"}`)
+	// Loop with cursor to merge paginated tools/list results. Bound the
+	// iterations so a misbehaving backend cannot spin /info forever.
+	tools := make([]json.RawMessage, 0, 16)
+	cursor := ""
+	for page := 0; page < MaxInfoListPages; page++ {
+		reqBody, err := buildInfoListRequest(cursor)
+		if err != nil {
+			d.logger.Warn("info build request", "handle", handle, "err", err)
+			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+			return
+		}
 
-	outReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, target, bytes.NewReader(reqBody))
-	if err != nil {
-		d.logger.Warn("info build request", "handle", handle, "err", err)
-		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-		return
-	}
-	copyRequestHeaders(outReq.Header, r.Header)
-	outReq.Header.Set("Content-Type", "application/json")
-	// The Streamable HTTP MCP transport spec requires clients to declare
-	// they accept BOTH application/json and text/event-stream — some
-	// vendor MCPs (e.g. Exa) enforce this and reject requests that only
-	// list application/json with a JSON-RPC 406. Advertise both so the
-	// /info probe works across every streamable-HTTP backend.
-	outReq.Header.Set("Accept", "application/json, text/event-stream")
+		outReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, target, bytes.NewReader(reqBody))
+		if err != nil {
+			d.logger.Warn("info build request", "handle", handle, "err", err)
+			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+			return
+		}
+		copyRequestHeaders(outReq.Header, r.Header)
+		outReq.Header.Set("Content-Type", "application/json")
+		// The Streamable HTTP MCP transport spec requires clients to declare
+		// they accept BOTH application/json and text/event-stream — some
+		// vendor MCPs (e.g. Exa) enforce this and reject requests that only
+		// list application/json with a JSON-RPC 406. Advertise both so the
+		// /info probe works across every streamable-HTTP backend.
+		outReq.Header.Set("Accept", "application/json, text/event-stream")
 
-	resp, err := d.clientFor(&hcfg).Do(outReq) // #nosec G107,G704 — target URL is resolved from static config (remote by name or 127.0.0.1:<subprocess-port>); consumer input never influences it
-	if err != nil {
-		d.logger.Warn("info upstream error", "handle", handle, "err", err)
-		http.Error(w, "upstream error", http.StatusBadGateway)
-		return
-	}
-	defer func() { _ = resp.Body.Close() }()
+		resp, err := d.clientFor(&hcfg).Do(outReq) // #nosec G107,G704 — target URL is resolved from static config (remote by name or 127.0.0.1:<subprocess-port>); consumer input never influences it
+		if err != nil {
+			d.logger.Warn("info upstream error", "handle", handle, "err", err)
+			http.Error(w, "upstream error", http.StatusBadGateway)
+			return
+		}
 
-	// Propagate upstream 4xx verbatim (most importantly 401, so the
-	// consumer can distinguish "credentials invalid" from 502).
-	if resp.StatusCode >= 400 && resp.StatusCode < 500 {
-		copyHeaders(w.Header(), resp.Header, "Content-Length")
-		w.WriteHeader(resp.StatusCode)
-		_, _ = io.Copy(w, resp.Body)
-		return
-	}
-	if resp.StatusCode >= 500 {
-		d.logger.Warn("info upstream 5xx", "handle", handle, "status", resp.StatusCode)
-		http.Error(w, "upstream error", http.StatusBadGateway)
-		return
+		// Propagate upstream 4xx verbatim (most importantly 401, so the
+		// consumer can distinguish "credentials invalid" from 502).
+		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+			copyHeaders(w.Header(), resp.Header, "Content-Length")
+			w.WriteHeader(resp.StatusCode)
+			_, _ = io.Copy(w, resp.Body)
+			_ = resp.Body.Close()
+			return
+		}
+		if resp.StatusCode >= 500 {
+			d.logger.Warn("info upstream 5xx", "handle", handle, "status", resp.StatusCode)
+			_ = resp.Body.Close()
+			http.Error(w, "upstream error", http.StatusBadGateway)
+			return
+		}
+
+		// Decode the JSON-RPC envelope. The Streamable HTTP MCP transport
+		// spec lets servers answer with either application/json or
+		// text/event-stream; vendors like Exa pick SSE, so we sniff the
+		// Content-Type and extract the first data: payload when needed.
+		payload, err := readJSONRPCBody(resp)
+		if err != nil {
+			d.logger.Warn("info read upstream body", "handle", handle, "err", err)
+			_ = resp.Body.Close()
+			http.Error(w, "bad upstream response", http.StatusBadGateway)
+			return
+		}
+		_ = resp.Body.Close()
+		var cur struct {
+			Result struct {
+				Tools      []json.RawMessage `json:"tools"`
+				NextCursor string            `json:"nextCursor,omitempty"`
+			} `json:"result"`
+			Error json.RawMessage `json:"error,omitempty"`
+		}
+		if err := json.Unmarshal(payload, &cur); err != nil {
+			d.logger.Warn("info decode upstream", "handle", handle, "err", err)
+			http.Error(w, "bad upstream response", http.StatusBadGateway)
+			return
+		}
+		if len(cur.Error) > 0 {
+			d.logger.Warn("info upstream JSON-RPC error", "handle", handle, "err", string(cur.Error))
+			http.Error(w, "upstream JSON-RPC error", http.StatusBadGateway)
+			return
+		}
+
+		tools = append(tools, cur.Result.Tools...) // merge this page
+		cursor = cur.Result.NextCursor
+		if cursor == "" {
+			break
+		}
 	}
 
-	// Decode the JSON-RPC envelope. The Streamable HTTP MCP transport
-	// spec lets servers answer with either application/json or
-	// text/event-stream; vendors like Exa pick SSE, so we sniff the
-	// Content-Type and extract the first data: payload when needed.
-	payload, err := readJSONRPCBody(resp)
-	if err != nil {
-		d.logger.Warn("info read upstream body", "handle", handle, "err", err)
-		http.Error(w, "bad upstream response", http.StatusBadGateway)
-		return
-	}
-	var upstream struct {
-		Result struct {
-			Tools []json.RawMessage `json:"tools"`
-		} `json:"result"`
-		Error json.RawMessage `json:"error,omitempty"`
-	}
-	if err := json.Unmarshal(payload, &upstream); err != nil {
-		d.logger.Warn("info decode upstream", "handle", handle, "err", err)
-		http.Error(w, "bad upstream response", http.StatusBadGateway)
-		return
-	}
-	if len(upstream.Error) > 0 {
-		d.logger.Warn("info upstream JSON-RPC error", "handle", handle, "err", string(upstream.Error))
-		http.Error(w, "upstream JSON-RPC error", http.StatusBadGateway)
-		return
-	}
-
-	tools := upstream.Result.Tools
 	if len(hcfg.ToolSet) > 0 {
 		tools = filterToolsByAllowList(tools, hcfg.ToolSet)
 	}
@@ -135,11 +154,33 @@ func (d *Dispatcher) HandleInfo(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// buildInfoListRequest synthesizes the JSON-RPC tools/list request used by
+// /info. When cursor is non-empty it is carried as params.cursor to page
+// through a paginated backend.
+func buildInfoListRequest(cursor string) ([]byte, error) {
+	type params struct {
+		Cursor string `json:"cursor,omitempty"`
+	}
+	type req struct {
+		JSONRPC string `json:"jsonrpc"`
+		ID      string `json:"id"`
+		Method  string `json:"method"`
+		Params  params `json:"params,omitempty"`
+	}
+	var body req
+	body.JSONRPC = "2.0"
+	body.ID = "info"
+	body.Method = "tools/list"
+	if cursor != "" {
+		body.Params = params{Cursor: cursor}
+	}
+	return json.Marshal(body)
+}
+
 // readJSONRPCBody returns the JSON-RPC envelope embedded in an MCP
 // response regardless of whether the upstream picked application/json
 // or text/event-stream as its Content-Type. Delegates SSE extraction to
-// the shared DecodeSSEPayload helper and caps the body at
-// MaxResponseBodyBytes.
+// the shared DecodeSSEPayload helper.
 func readJSONRPCBody(resp *http.Response) ([]byte, error) {
 	mt, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
 	if mt != "text/event-stream" {

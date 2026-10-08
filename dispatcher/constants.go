@@ -30,6 +30,9 @@ const (
 	// fail closed with 502 instead of being forwarded.
 	MaxResponseBodyBytes = 10 << 20
 
+	// MaxInfoListPages bounds the /info tools/list pagination loop.
+	MaxInfoListPages = 5
+
 	// PoolRetryAttempts caps Pool.GetOrSpawn retry loops.
 	PoolRetryAttempts = 3
 
