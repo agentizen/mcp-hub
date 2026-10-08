@@ -226,6 +226,57 @@ func TestHandleInfo_JSONRPCError_Returns502(t *testing.T) {
 	}
 }
 
+func TestHandleInfo_PaginatedTools_MergedAndFiltered(t *testing.T) {
+	requests := make([]string, 0, 8)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		body := string(raw)
+		requests = append(requests, body)
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(body, "cursor") {
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":"info","result":{"tools":[{"name":"c"}]}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":"info","result":{"tools":[{"name":"a"},{"name":"b"}],"nextCursor":"page-2"}}`))
+	}))
+	defer srv.Close()
+
+	cfg := &Config{
+		Remotes: []RemoteConfig{{Name: "r", URL: srv.URL}},
+		Handles: map[string]HandleConfig{
+			"h": {Remote: "r", ToolSet: map[string]bool{"a": true, "c": true}},
+		},
+	}
+	d := NewDispatcher(cfg, NewPool(nil, newTestLogger()), newTestLogger())
+
+	req := newInfoRequest(http.MethodGet, "h", "", nil)
+	rr := httptest.NewRecorder()
+	d.HandleInfo(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("code = %d, body=%s", rr.Code, rr.Body.String())
+	}
+	if len(requests) != 2 {
+		t.Errorf("want 2 upstream pages, got %d: %v", len(requests), requests)
+	}
+	var resp InfoResponse
+	_ = json.Unmarshal(rr.Body.Bytes(), &resp)
+	if len(resp.Tools) != 2 {
+		t.Fatalf("tools = %v, want merged+filtered {a,c}", resp.Tools)
+	}
+	names := map[string]bool{}
+	for _, raw := range resp.Tools {
+		var m struct {
+			Name string `json:"name"`
+		}
+		_ = json.Unmarshal(raw, &m)
+		names[m.Name] = true
+	}
+	if !names["a"] || !names["c"] || names["b"] {
+		t.Errorf("merged names = %v, want {a,c} (b dropped)", names)
+	}
+}
+
 func TestHandleInfo_EmptyToolsResult_ReturnsEmptyArray(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
