@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func writeTempConfig(t *testing.T, content string) string {
@@ -204,5 +205,196 @@ handles: {}
 	}
 	if names := cfg.HandleNames(); len(names) != 0 {
 		t.Errorf("want empty handle list, got %v", names)
+	}
+}
+
+func TestLoadConfig_TimeoutSeconds_Invalid(t *testing.T) {
+	cases := []struct {
+		label   string
+		content string
+		needle  string
+	}{
+		{"negative subprocess", `
+subprocesses:
+  - name: a
+    port: 9000
+    command: [sleep, "30"]
+    timeout_seconds: -1
+`, "timeout_seconds"},
+		{"over-capped subprocess", `
+subprocesses:
+  - name: a
+    port: 9000
+    command: [sleep, "30"]
+    timeout_seconds: 301
+`, "exceeds"},
+		{"negative remote", `
+remotes:
+  - name: r
+    url: https://example.test/mcp
+    timeout_seconds: -5
+`, "timeout_seconds"},
+		{"over-capped remote", `
+remotes:
+  - name: r
+    url: https://example.test/mcp
+    timeout_seconds: 10000
+`, "exceeds"},
+		{"negative handle", `
+remotes:
+  - name: r
+    url: https://example.test/mcp
+handles:
+  h:
+    remote: r
+    timeout_seconds: -2
+`, "timeout_seconds"},
+		{"over-capped handle", `
+remotes:
+  - name: r
+    url: https://example.test/mcp
+handles:
+  h:
+    remote: r
+    timeout_seconds: 999999
+`, "exceeds"},
+		{"negative max bytes", `
+remotes:
+  - name: r
+    url: https://example.test/mcp
+handles:
+  h:
+    remote: r
+    max_response_bytes: -1
+`, "max_response_bytes"},
+	}
+	for _, c := range cases {
+		path := writeTempConfig(t, c.content)
+		_, err := LoadConfig(path)
+		if err == nil {
+			t.Errorf("%s: want validation error, got nil", c.label)
+			continue
+		}
+		if !strings.Contains(err.Error(), c.needle) {
+			t.Errorf("%s: error message %q missing %q", c.label, err.Error(), c.needle)
+		}
+	}
+}
+
+func TestLoadConfig_TimeoutSeconds_Valid(t *testing.T) {
+	path := writeTempConfig(t, `
+remotes:
+  - name: r
+    url: https://example.test/mcp
+    timeout_seconds: 30
+handles:
+  h:
+    remote: r
+    timeout_seconds: 300
+`)
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.Handles["h"].ResolvedTimeout != 300*time.Second {
+		t.Errorf("ResolvedTimeout = %v, want 300s", cfg.Handles["h"].ResolvedTimeout)
+	}
+}
+
+func TestLoadConfig_TimeoutResolution_FallsBackToRemote(t *testing.T) {
+	path := writeTempConfig(t, `
+remotes:
+  - name: r
+    url: https://example.test/mcp
+    timeout_seconds: 45
+  - name: r2
+    url: https://example.test/mcp
+handles:
+  inherits:
+    remote: r
+  defaults:
+    remote: r2
+`)
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if got := cfg.Handles["inherits"].ResolvedTimeout; got != 45*time.Second {
+		t.Errorf("inherits ResolvedTimeout = %v, want 45s", got)
+	}
+	if got := cfg.Handles["defaults"].ResolvedTimeout; got != RequestForwardTimeout {
+		t.Errorf("defaults ResolvedTimeout = %v, want global %v", got, RequestForwardTimeout)
+	}
+}
+
+func TestLoadConfig_TimeoutResolution_HandleOverridesBackend(t *testing.T) {
+	path := writeTempConfig(t, `
+remotes:
+  - name: r
+    url: https://example.test/mcp
+    timeout_seconds: 45
+handles:
+  h:
+    remote: r
+    timeout_seconds: 10
+`)
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if got := cfg.Handles["h"].ResolvedTimeout; got != 10*time.Second {
+		t.Errorf("ResolvedTimeout = %v, want 10s (handle wins)", got)
+	}
+}
+
+func TestLoadConfig_TimeoutResolution_SubprocessBackend(t *testing.T) {
+	path := writeTempConfig(t, `
+subprocesses:
+  - name: sp
+    port: 9000
+    command: [sleep, "30"]
+    timeout_seconds: 60
+handles:
+  h:
+    subprocess: sp
+`)
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if got := cfg.Handles["h"].ResolvedTimeout; got != 60*time.Second {
+		t.Errorf("ResolvedTimeout = %v, want 60s from subprocess", got)
+	}
+}
+
+func TestLoadConfig_MaxResponseResolution(t *testing.T) {
+	path := writeTempConfig(t, `
+remotes:
+  - name: r
+    url: https://example.test/mcp
+    max_response_bytes: 2048
+  - name: r2
+    url: https://example.test/mcp
+handles:
+  inherits:
+    remote: r
+  overrides:
+    remote: r
+    max_response_bytes: 4096
+  defaults:
+    remote: r2
+`)
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if got := cfg.Handles["inherits"].ResolvedMaxBytes; got != 2048 {
+		t.Errorf("inherits ResolvedMaxBytes = %d, want 2048", got)
+	}
+	if got := cfg.Handles["overrides"].ResolvedMaxBytes; got != 4096 {
+		t.Errorf("overrides ResolvedMaxBytes = %d, want 4096", got)
+	}
+	if got := cfg.Handles["defaults"].ResolvedMaxBytes; got != MaxResponseBodyBytes {
+		t.Errorf("defaults ResolvedMaxBytes = %d, want global %d", got, MaxResponseBodyBytes)
 	}
 }

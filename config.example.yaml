@@ -7,6 +7,16 @@
 #                   references exactly one subprocess or remote, and may
 #                   optionally filter the backend's tools via an
 #                   allow-list.
+#
+# Per-backend and per-handle limits:
+#   timeout_seconds    — max wall-clock for a single forwarded request.
+#                        0 (or unset) means "fall back to the backend's
+#                        value, then to the global 5-minute default".
+#   max_response_bytes — hard cap on upstream response bodies; an
+#                        oversized response fails closed with 502.
+#                        0 (or unset) means "fall back to the backend's
+#                        value, then to the global 10 MiB default".
+#                        Applies to both filtered and pass-through paths.
 
 subprocesses:
   # Microsoft 365 (Outlook, Calendar, OneDrive, SharePoint, Teams, Excel)
@@ -53,6 +63,7 @@ subprocesses:
 remotes:
   - name: clickup
     url: https://mcp.clickup.com/mcp
+    timeout_seconds: 30
   - name: hubspot
     url: https://mcp.hubspot.com
   - name: atlassian
@@ -69,11 +80,14 @@ remotes:
     url: https://mcp.context7.com
   - name: exa
     url: https://mcp.exa.ai
+    timeout_seconds: 30
+    max_response_bytes: 10485760
 
 handles:
   # ── Microsoft 365 (subprocess m365) ───────────────────────────────
   outlook:
     subprocess: m365
+    timeout_seconds: 30
     tools:
       - add-mail-attachment
       - create-draft-email

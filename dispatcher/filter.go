@@ -1,9 +1,13 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"strings"
 )
 
 // toolCallInspection is the minimal subset of a JSON-RPC request we need
@@ -124,4 +128,54 @@ func FilterToolsListResponse(body []byte, allowed map[string]bool) ([]byte, bool
 		return nil, false, err
 	}
 	return out, true, nil
+}
+
+// DecodeSSEPayload returns the JSON-RPC envelope embedded in an MCP
+// response regardless of whether the upstream picked application/json
+// or text/event-stream as its Content-Type. For SSE, the first event's
+// `data:` lines are concatenated and returned as raw JSON.
+func DecodeSSEPayload(r io.Reader) ([]byte, error) {
+	scanner := bufio.NewScanner(r)
+	// MCP tool listings can be sizeable; bump the default 64KiB cap.
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	var data strings.Builder
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			if data.Len() > 0 {
+				break // end of first event
+			}
+			continue
+		}
+		if rest, ok := strings.CutPrefix(line, "data:"); ok {
+			if data.Len() > 0 {
+				data.WriteByte('\n')
+			}
+			data.WriteString(strings.TrimPrefix(rest, " "))
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	if data.Len() == 0 {
+		return nil, errors.New("empty SSE stream")
+	}
+	return []byte(data.String()), nil
+}
+
+// EncodeSSEPayload re-emits a filtered JSON-RPC envelope as a single SSE
+// event. The Streamable HTTP transport uses the same `data:` framing for
+// every event type, so a plain data-only event is interoperable.
+func EncodeSSEPayload(payload []byte) ([]byte, error) {
+	buf := bytes.NewBuffer(make([]byte, 0, len(payload)+16))
+	if _, err := buf.Write([]byte("data: ")); err != nil {
+		return nil, err
+	}
+	if _, err := buf.Write(payload); err != nil {
+		return nil, err
+	}
+	if _, err := buf.Write([]byte("\n\n")); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }

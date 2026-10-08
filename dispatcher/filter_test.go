@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -158,5 +160,60 @@ func TestFilterToolsListResponse_ErrorEnvelope_PassesThrough(t *testing.T) {
 	}
 	if filtered {
 		t.Error("error envelope should NOT be filtered")
+	}
+}
+
+func TestDecodeSSEPayload_SingleEvent(t *testing.T) {
+	data := []byte("data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"tools\":[]}}\n\n")
+	payload, err := DecodeSSEPayload(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("DecodeSSEPayload: %v", err)
+	}
+	if strings.Contains(string(payload), "data:") {
+		t.Errorf("payload should be raw JSON, got %q", string(payload))
+	}
+	var env map[string]json.RawMessage
+	if uerr := json.Unmarshal(payload, &env); uerr != nil {
+		t.Fatalf("decoded payload is not JSON: %v — %q", uerr, string(payload))
+	}
+}
+
+func TestDecodeSSEPayload_MultiLineData(t *testing.T) {
+	data := []byte("data: line1\ndata: line2\n\n")
+	payload, err := DecodeSSEPayload(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("DecodeSSEPayload: %v", err)
+	}
+	if string(payload) != "line1\nline2" {
+		t.Errorf("multi-line data = %q", string(payload))
+	}
+}
+
+func TestDecodeSSEPayload_IgnoresOtherEventsAndFields(t *testing.T) {
+	data := []byte("event: ping\ndata: {\"x\":1}\n\n")
+	payload, err := DecodeSSEPayload(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("DecodeSSEPayload: %v", err)
+	}
+	if string(payload) != `{"x":1}` {
+		t.Errorf("payload = %q", string(payload))
+	}
+}
+
+func TestDecodeSSEPayload_EmptyStream_Errors(t *testing.T) {
+	_, err := DecodeSSEPayload(bytes.NewReader([]byte("\n\n")))
+	if err == nil {
+		t.Error("want error for empty SSE stream")
+	}
+}
+
+func TestEncodeSSEPayload_ProducesDataEvent(t *testing.T) {
+	payload := []byte(`{"jsonrpc":"2.0","result":{"tools":[]}}`)
+	out, err := EncodeSSEPayload(payload)
+	if err != nil {
+		t.Fatalf("EncodeSSEPayload: %v", err)
+	}
+	if string(out) != "data: "+string(payload)+"\n\n" {
+		t.Errorf("encoded SSE = %q", string(out))
 	}
 }

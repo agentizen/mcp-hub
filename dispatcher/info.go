@@ -1,14 +1,12 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
 	"mime"
 	"net/http"
-	"strings"
 )
 
 // InfoResponse is the body returned by GET|POST /mcp/{handle}/info.
@@ -70,7 +68,7 @@ func (d *Dispatcher) HandleInfo(w http.ResponseWriter, r *http.Request) {
 	// /info probe works across every streamable-HTTP backend.
 	outReq.Header.Set("Accept", "application/json, text/event-stream")
 
-	resp, err := d.client.Do(outReq) // #nosec G107,G704 — target URL is resolved from static config (remote by name or 127.0.0.1:<subprocess-port>); consumer input never influences it
+	resp, err := d.clientFor(&hcfg).Do(outReq) // #nosec G107,G704 — target URL is resolved from static config (remote by name or 127.0.0.1:<subprocess-port>); consumer input never influences it
 	if err != nil {
 		d.logger.Warn("info upstream error", "handle", handle, "err", err)
 		http.Error(w, "upstream error", http.StatusBadGateway)
@@ -139,40 +137,22 @@ func (d *Dispatcher) HandleInfo(w http.ResponseWriter, r *http.Request) {
 
 // readJSONRPCBody returns the JSON-RPC envelope embedded in an MCP
 // response regardless of whether the upstream picked application/json
-// or text/event-stream as its Content-Type. For SSE, it concatenates
-// every `data:` line of the first event (SSE allows multi-line data)
-// and returns that as raw JSON.
+// or text/event-stream as its Content-Type. Delegates SSE extraction to
+// the shared DecodeSSEPayload helper and caps the body at
+// MaxResponseBodyBytes.
 func readJSONRPCBody(resp *http.Response) ([]byte, error) {
 	mt, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
 	if mt != "text/event-stream" {
-		return io.ReadAll(resp.Body)
-	}
-	scanner := bufio.NewScanner(resp.Body)
-	// MCP tool listings can be sizeable; bump the default 64KiB cap.
-	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-	var data strings.Builder
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" {
-			if data.Len() > 0 {
-				break // end of first event
-			}
-			continue
+		data, err := io.ReadAll(io.LimitReader(resp.Body, int64(MaxResponseBodyBytes)+1))
+		if err != nil {
+			return nil, err
 		}
-		if rest, ok := strings.CutPrefix(line, "data:"); ok {
-			if data.Len() > 0 {
-				data.WriteByte('\n')
-			}
-			data.WriteString(strings.TrimPrefix(rest, " "))
+		if len(data) > MaxResponseBodyBytes {
+			return nil, errors.New("upstream response too large")
 		}
+		return data, nil
 	}
-	if err := scanner.Err(); err != nil {
-		return nil, err
-	}
-	if data.Len() == 0 {
-		return nil, errors.New("empty SSE stream")
-	}
-	return []byte(data.String()), nil
+	return DecodeSSEPayload(resp.Body)
 }
 
 // filterToolsByAllowList keeps only the tools whose name is in allowed.
